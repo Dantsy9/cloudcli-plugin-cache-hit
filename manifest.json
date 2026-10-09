@@ -1,0 +1,13 @@
+{
+  "name": "cache-hit",
+  "displayName": "缓存命中",
+  "version": "1.0.0",
+  "description": "分析 Claude Code 会话的 prompt cache 命中率、逐轮趋势、缓存断裂归因与成本节省。",
+  "author": "cc-haha plugin",
+  "icon": "icon.svg",
+  "type": "module",
+  "slot": "tab",
+  "entry": "dist/index.js",
+  "server": "dist/server.js",
+  "permissions": []
+}

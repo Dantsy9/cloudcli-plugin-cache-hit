@@ -1,0 +1,18 @@
+{
+  "name": "cloudcli-plugin-cache-hit",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "CloudCLI UI plugin: prompt cache hit-rate analysis for Claude Code sessions.",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node test/analysis.test.mjs && node test/frontend.test.mjs",
+    "test:e2e": "node test/e2e-server.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "jsdom": "^30.1.1",
+    "typescript": "^5.5.4"
+  }
+}
