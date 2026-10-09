@@ -15,6 +15,7 @@ import type {
   OverviewResponse,
   PluginAPI,
   PluginContext,
+  RateBasis,
   SessionListItem,
   SessionListResponse,
   SessionSummary,
@@ -96,6 +97,27 @@ function fmtBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/** `283` / `9.4` / `--` — mirrors cc-haha's `formatTokensPerSecond()`. */
+function fmtTokPerSec(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value <= 0) return '--';
+  return value >= 10 ? `${Math.round(value)}` : value.toFixed(1);
+}
+
+/**
+ * What the output rate actually divides by. Rendered next to the number so it
+ * can never be mistaken for a decode-only peak.
+ */
+function rateBasisNote(basis: RateBasis, toolMs?: number | null): string {
+  switch (basis) {
+    case 'api-duration':
+      return '输出 ÷ API 累计耗时（含 prefill，不含工具执行）';
+    case 'wall-clock':
+      return '无 cost-state 快照：用会话跨度，含工具与空闲，仅作趋势参考';
+    default:
+      return toolMs === 0 ? '无法计算：transcript 缺少 API 耗时' : '无法计算：transcript 缺少 API 耗时';
+  }
 }
 
 function basename(p: string | undefined | null): string {
@@ -601,6 +623,13 @@ ${renderWarnings(c, summary.warnings)}
 
 <div class="ch-grid ch-grid-6">
   ${kpi('加权命中率', fmtRate(t.hitRate), `按 token 加权（${fmtFull(t.turns)} 轮）`, rateColor, c)}
+  ${kpi(
+    '输出速率',
+    `${fmtTokPerSec(summary.outputTokensPerSecond)} tok/s`,
+    esc(rateBasisNote(summary.rateBasis)),
+    summary.rateBasis === 'api-duration' ? c.good : c.muted,
+    c,
+  )}
   ${kpi('缓存命中 Token', fmtCompact(t.cacheRead), `占 prompt 的 ${fmtRate(t.hitRate)}`, c.accent, c)}
   ${kpi('缓存写入 Token', fmtCompact(t.cacheCreation), '5m/1h ephemeral 写入', c.info, c)}
   ${kpi('新 Token', fmtCompact(t.newTokens), '未缓存输入 + 输出', c.text, c)}
@@ -637,6 +666,24 @@ ${renderWarnings(c, summary.warnings)}
       <span>断裂次数</span><span class="ch-num" style="color:${summary.breaks.length ? c.bad : c.good}">${fmtFull(summary.breaks.length)}</span>
       <span>断裂丢失缓存</span><span class="ch-num" style="color:${c.text}">${fmtFull(lostTokens)} tokens</span>
       <span>断裂额外成本</span><span class="ch-num" style="color:${c.text}">${fmtUSD(extraCost)}</span>
+      ${
+        summary.runtime.present
+          ? `
+      <span>API 累计耗时</span><span class="ch-num" style="color:${c.text}">${fmtGap(summary.runtime.totalAPIDurationMs)}</span>
+      <span>工具累计耗时</span><span class="ch-num" style="color:${c.text}">${fmtGap(summary.runtime.totalToolDurationMs)}</span>
+      <span>会话总跨度</span><span class="ch-num" style="color:${c.text}">${fmtGap(summary.runtime.totalDurationMs)}</span>
+      <span>运行时累计命中率</span><span class="ch-num" style="color:${c.text}">${fmtRate(summary.runtime.hitRate)}</span>
+      <span>运行时累计成本</span><span class="ch-num" style="color:${c.text}">${fmtUSD(summary.runtime.totalCostUSD)}</span>
+      <span>cost-state 检查点</span><span class="ch-num" style="color:${c.muted}">${fmtFull(summary.runtime.snapshots)} 个</span>
+      `
+          : `
+      <span>运行时遥测</span><span class="ch-num" style="color:${c.muted}">该 transcript 无 cost-state 检查点</span>
+      `
+      }
+    </div>
+    <div class="ch-note" style="color:${c.faint};margin-top:8px">
+      未标「运行时」的行都是本页自己按主线程逐轮提取的；标「运行时」的那几行来自 Claude Code 写进 transcript 的 cost-state 检查点，
+      是会话进程的累计计费视角（含子 agent 等全部模型），两者范围不同，数字不要求相等。
     </div>
   </div>
 </div>

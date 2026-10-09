@@ -115,6 +115,56 @@ export interface OverviewBreak extends CacheBreak {
   projectPath: string;
 }
 
+/* ── Runtime telemetry (the transcript's own `cost-state` checkpoints) ────── */
+
+export interface RuntimeModelUsage {
+  model: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  costUSD: number;
+}
+
+/**
+ * The newest `cost-state` snapshot found in the transcript.
+ *
+ * Cumulative and runtime-authored, so it includes every model the session
+ * process billed — subagents included. That is why `hitRate` here can differ
+ * from the main-thread figure the rest of the panel reports; the two are shown
+ * side by side rather than blended.
+ */
+export interface RuntimeState {
+  /** False when the transcript carries no `cost-state` record at all. */
+  present: boolean;
+  /** How many cumulative checkpoints were found. */
+  snapshots: number;
+  startTime: number | null;
+  /** API wall-clock, prefill included, tool execution excluded. */
+  totalAPIDurationMs: number;
+  totalAPIDurationWithoutRetriesMs: number;
+  totalToolDurationMs: number;
+  totalDurationMs: number;
+  totalCostUSD: number;
+  totalOutputTokens: number;
+  promptTokens: number;
+  cacheRead: number;
+  cacheCreation: number;
+  hitRate: number | null;
+  models: RuntimeModelUsage[];
+}
+
+/**
+ * How `outputTokensPerSecond` was derived. Rendered verbatim by the UI so the
+ * number can never be read as a decode-only peak.
+ */
+export type RateBasis =
+  /** output / API wall-clock — cc-haha's `tokensPerSecond` formula. */
+  | 'api-duration'
+  /** output / (session end - start). Includes tool time and idle; labelled as such. */
+  | 'wall-clock'
+  | 'unavailable';
+
 export interface ModelBreakdown extends TokenCounts {
   model: string;
   turns: number;
@@ -177,6 +227,14 @@ export interface SessionSummary {
   turns: TurnMetrics[];
   breaks: CacheBreak[];
   counts: SessionCounts;
+  /**
+   * Output tokens per second, or null when no rate can be derived.
+   * See `rateBasis` for what the denominator actually is.
+   */
+  outputTokensPerSecond: number | null;
+  rateBasis: RateBasis;
+  /** The transcript's own cumulative telemetry, for cross-checking. */
+  runtime: RuntimeState;
   warnings: string[];
 }
 
@@ -272,6 +330,17 @@ export interface StatusResponse {
   /** The model that consumed the most prompt tokens. */
   model: string | null;
   hitRate: number | null;
+  /** Output tokens per second. Null when no rate can be derived. */
+  outputTokensPerSecond: number | null;
+  /** What `outputTokensPerSecond` divides by — never assume it is decode-only. */
+  rateBasis: RateBasis;
+  /** API wall-clock from the transcript's own checkpoint, or null when absent. */
+  apiDurationMs: number | null;
+  toolDurationMs: number | null;
+  sessionDurationMs: number | null;
+  /** Runtime-authored cumulative hit rate (subagents included); null when absent. */
+  runtimeHitRate: number | null;
+  runtimeCostUSD: number | null;
   cacheRead: number;
   cacheCreation: number;
   promptTokens: number;

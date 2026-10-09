@@ -13,12 +13,15 @@ import type {
   DayBucket,
   OverviewBreak,
   OverviewResponse,
+  RateBasis,
+  RuntimeState,
   SessionCounts,
   SessionSummary,
   TurnMetrics,
 } from '../types.js';
 import { detectBreaks, type BreakDetectionTurn } from './breaks.js';
-import { hitRateOf, summarizeModels, summarizeTotals, turnCost } from './metrics.js';
+import { formatCacheHitRate, hitRateOf, summarizeModels, summarizeTotals, tokensPerSecond, turnCost } from './metrics.js';
+import { readRuntimeState } from './runtime.js';
 import {
   claudeProjectsRoot,
   encodeProjectPath,
@@ -236,6 +239,27 @@ export async function summarizeSessionFile(options: SummarizeOptions): Promise<S
   const parsed = parseTranscript(read.text, read.truncated);
   const extraction = extractTurns(parsed);
   const { breaks, warnings } = detectBreaks(extraction.turns);
+  const totals = summarizeTotals(extraction.turns);
+
+  /*
+   * Output rate. Preferred denominator is the runtime's own API wall-clock,
+   * which is cc-haha's formula. Only when the transcript carries no `cost-state`
+   * checkpoint — two of three real transcripts I sampled had none — do we fall
+   * back to the session span, and then the basis is labelled so the UI can say
+   * what the number actually divides by.
+   */
+  const runtime = readRuntimeState(parsed.lines);
+  let outputTokensPerSecond = tokensPerSecond(runtime.totalOutputTokens, runtime.totalAPIDurationMs);
+  let rateBasis: RateBasis = outputTokensPerSecond === null ? 'unavailable' : 'api-duration';
+
+  if (outputTokensPerSecond === null) {
+    const spanMs =
+      extraction.startedAt !== null && extraction.endedAt !== null && extraction.endedAt > extraction.startedAt
+        ? extraction.endedAt - extraction.startedAt
+        : 0;
+    outputTokensPerSecond = tokensPerSecond(totals.output, spanMs);
+    if (outputTokensPerSecond !== null) rateBasis = 'wall-clock';
+  }
 
   const summary: SessionSummary = {
     projectPath: options.projectPath,
@@ -249,11 +273,14 @@ export async function summarizeSessionFile(options: SummarizeOptions): Promise<S
     },
     startedAt: extraction.startedAt,
     endedAt: extraction.endedAt,
-    totals: summarizeTotals(extraction.turns),
+    totals,
     models: summarizeModels(extraction.turns),
     turns: extraction.turns.map(stripDetectionFields),
     breaks,
     counts: extraction.counts,
+    outputTokensPerSecond,
+    rateBasis,
+    runtime,
     warnings,
   };
 
@@ -287,6 +314,23 @@ export async function summarizeSessionFile(options: SummarizeOptions): Promise<S
     summary.warnings.push(
       `以下模型没有公开定价，已从成本合计中排除（cc-haha 同样拒绝用 Claude 价格给第三方模型计价）：${unpriced.map((m) => m.model).join(', ')}`,
     );
+  }
+
+  if (rateBasis === 'wall-clock') {
+    summary.warnings.push(
+      `该 transcript 没有 cost-state 快照，无法用 API 耗时计算输出速率。当前的 tok/s 用的是会话时间跨度（含工具执行与空闲），会明显低于真实解码速度 —— 仅作趋势参考，不要当作生成速度。`,
+    );
+  } else if (rateBasis === 'unavailable') {
+    summary.warnings.push('无法计算输出速率：transcript 既没有 cost-state 快照，也没有可用的时间跨度。');
+  }
+
+  if (runtime.present) {
+    const delta = runtime.hitRate !== null && totals.hitRate !== null ? Math.abs(runtime.hitRate - totals.hitRate) : null;
+    if (delta !== null && delta >= 0.02) {
+      summary.warnings.push(
+        `运行时累计命中率 ${formatCacheHitRate(runtime.hitRate)} 与本页主线程口径 ${formatCacheHitRate(totals.hitRate)} 相差 ${(delta * 100).toFixed(1)} 个百分点。两者都对：前者是 Claude Code 自己按会话累计、包含子 agent 等全部模型的计费视角，后者是本页按主线程逐轮提取并去重后的口径。`,
+      );
+    }
   }
 
   sessionCache.set(options.file, { mtimeMs: stats.mtimeMs, size: stats.size, summary });

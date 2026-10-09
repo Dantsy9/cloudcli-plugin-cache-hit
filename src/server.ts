@@ -23,7 +23,7 @@ import type {
   StatusResponse,
 } from './types.js';
 import { buildOverview, cacheEntryCount, clearAnalysisCache, summarizeSessionFile } from './analyze/summarize.js';
-import { formatCacheHitRate, formatCompactTokens } from './analyze/metrics.js';
+import { formatCacheHitRate, formatCompactTokens, formatTokensPerSecond } from './analyze/metrics.js';
 import {
   claudeProjectsRoot,
   listProjectDirectories,
@@ -189,25 +189,37 @@ const routes: Record<string, Handler> = {
       updatedAt: Date.now(),
     };
 
+    /** Fields that are absent, not zero, whenever there is nothing to report. */
+    const blank = {
+      sessionId: null,
+      transcriptFile: null,
+      turnCount: 0,
+      model: null,
+      hitRate: null,
+      outputTokensPerSecond: null,
+      rateBasis: 'unavailable' as const,
+      apiDurationMs: null,
+      toolDurationMs: null,
+      sessionDurationMs: null,
+      runtimeHitRate: null,
+      runtimeCostUSD: null,
+      cacheRead: 0,
+      cacheCreation: 0,
+      promptTokens: 0,
+      newTokens: 0,
+      breaks: 0,
+      lostCachedTokens: 0,
+      actualCostUSD: null,
+      savedUSD: null,
+      truncated: false,
+    };
+
     if (!projectPath) {
       return {
         ...base,
+        ...blank,
         available: false,
         reason: '未选择项目',
-        sessionId: null,
-        transcriptFile: null,
-        turnCount: 0,
-        model: null,
-        hitRate: null,
-        cacheRead: 0,
-        cacheCreation: 0,
-        promptTokens: 0,
-        newTokens: 0,
-        breaks: 0,
-        lostCachedTokens: 0,
-        actualCostUSD: null,
-        savedUSD: null,
-        truncated: false,
         chipText: '缓存命中 --',
         detailText: '未选择项目',
       } satisfies StatusResponse;
@@ -221,22 +233,9 @@ const routes: Record<string, Handler> = {
       const reason = error instanceof TranscriptError ? error.message : String(error);
       return {
         ...base,
+        ...blank,
         available: false,
         reason,
-        sessionId: null,
-        transcriptFile: null,
-        turnCount: 0,
-        model: null,
-        hitRate: null,
-        cacheRead: 0,
-        cacheCreation: 0,
-        promptTokens: 0,
-        newTokens: 0,
-        breaks: 0,
-        lostCachedTokens: 0,
-        actualCostUSD: null,
-        savedUSD: null,
-        truncated: false,
         chipText: '缓存命中 --',
         detailText: '暂无会话',
       } satisfies StatusResponse;
@@ -248,9 +247,11 @@ const routes: Record<string, Handler> = {
       projectPath,
     });
     const t = summary.totals;
+    const runtime = summary.runtime;
     // The dominant model is the one that burned the most prompt tokens — the
     // same ordering `summarizeModels` already sorts by.
     const model = summary.models[0]?.model ?? null;
+    const rateText = `${formatTokensPerSecond(summary.outputTokensPerSecond)} tok/s`;
 
     return {
       ...base,
@@ -261,6 +262,13 @@ const routes: Record<string, Handler> = {
       turnCount: t.turns,
       model,
       hitRate: t.hitRate,
+      outputTokensPerSecond: summary.outputTokensPerSecond,
+      rateBasis: summary.rateBasis,
+      apiDurationMs: runtime.present ? runtime.totalAPIDurationMs : null,
+      toolDurationMs: runtime.present ? runtime.totalToolDurationMs : null,
+      sessionDurationMs: runtime.present ? runtime.totalDurationMs : null,
+      runtimeHitRate: runtime.present ? runtime.hitRate : null,
+      runtimeCostUSD: runtime.present ? runtime.totalCostUSD : null,
       cacheRead: t.cacheRead,
       cacheCreation: t.cacheCreation,
       promptTokens: t.promptTokens,
@@ -270,7 +278,7 @@ const routes: Record<string, Handler> = {
       actualCostUSD: t.cost.actualUSD,
       savedUSD: t.cost.savedUSD,
       truncated: summary.transcript.truncated,
-      chipText: t.turns > 0 ? `缓存命中 ${formatCacheHitRate(t.hitRate)}` : '缓存命中 --',
+      chipText: t.turns > 0 ? `缓存命中 ${formatCacheHitRate(t.hitRate)} · ${rateText}` : '缓存命中 --',
       detailText:
         t.turns > 0
           ? `${t.turns} 轮 · 缓存读 ${formatCompactTokens(t.cacheRead)} · 新 ${formatCompactTokens(t.newTokens)}`

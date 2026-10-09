@@ -28,6 +28,7 @@
 | **平均单轮命中率** | 各轮命中率的算术平均。与加权口径**必然不同**，两者并列展示，不混用 |
 | **缓存命中 / 写入 Token** | 读命中量、写缓存量，以及 5m/1h 拆分 |
 | **新 Token** | 未缓存输入 + 输出。缓存读**不算**新增消耗 |
+| **输出速率** | 输出 token ÷ API 累计耗时。**分母含 prefill、不含工具执行**，界面上始终标明分母（见 [口径 9](#9-输出速率的分母是-api-耗时不是会话时长)） |
 | **估算成本** | 实际成本、无缓存反事实成本、净节省、写入溢价 |
 | **逐轮趋势图** | 灰柱 = 该轮 prompt 总量，紫柱 = 命中部分，绿线 = 命中率，顶部红块 = 检测到断裂 |
 | **缓存断裂 + 归因** | 每一处命中塌陷的原因、丢失的缓存前缀长度、额外成本、以及对应的 transcript 行号 |
@@ -120,13 +121,19 @@ $HOME/.claude/projects/<项目绝对路径编码>/<会话id>.jsonl
 | 与其他插件通信 | 每个插件相互独立 |
 | 读用户 auth token / cookie | 宿主统一鉴权，从不暴露 |
 
-**结论：想让缓存数据常驻在对话框下方，必须改动宿主。** 补丁内容、数据来源与维护成本见 [`host-patch/README.md`](host-patch/README.md)，其中对比了三条替代路径：
+**结论：想让缓存数据常驻在对话框下方，或者想给内置的 `/cost` 弹窗加两行，都必须改动宿主。** 两份补丁、数据来源与维护成本：
 
-1. **宿主补丁**（约 30 行，数据仍来自本插件的 `/status`）
-2. **给上游提通用 footer 插槽**（最正确，但要等上游）
+- [`host-patch/README.md`](host-patch/README.md) —— 在**输入框下方**加一个常驻 chip
+- [`host-patch/cost-command.md`](host-patch/cost-command.md) —— 给内置 **`/cost` 命令的弹窗**加「缓存命中率」与「输出速率」
+
+替代路径对比：
+
+1. **宿主补丁**（约 30–45 行，数据仍来自本插件或宿主自己的 transcript 读取）
+2. **给上游提通用插槽**（最正确，但要等上游）
 3. **Claude Code 自己的 `statusLine`**（无需改宿主，但只在 Shell 标签页跑 `claude` TUI 时可见）
 
 > 本插件的 [`/status`](#status为输入框下方的一行准备) 端点就是为路径 1 准备的：一个请求拿到那行需要的全部数字。
+> 而 `/cost` 的补丁**不需要插件** —— 宿主服务器其实**已经把缓存 token 算出来了，只是丢掉了**（见 `host-patch/cost-command.md` 的证据）。
 
 ---
 
@@ -187,6 +194,38 @@ cacheRead < prevCacheRead × 0.95   且   prevCacheRead − cacheRead ≥ 2000
 
 归因顺序：`模型切换` → `1h TTL 过期` → `5m TTL 过期` → `前缀变化` → `疑似服务端` → `未确定`。
 
+### 9. 输出速率的分母是 API 耗时，不是会话时长
+
+用 cc-haha `deriveSessionUsageMetrics()` 的公式：
+
+```
+outputTokensPerSecond = output / (apiDurationMs / 1000)     // null 当任一侧为 0
+```
+
+cc-haha 明确拒绝用会话墙钟算速率：
+
+> "A caller that only has a transcript (no API duration) gets `null` rather than a rate computed against wall clock that **includes `Bash`**."
+
+问题是**宿主现有的 token 数据链路没有 API 耗时**。而这个数据在 transcript 里有：
+
+Claude Code 会把会话成本状态**检查点**写进 transcript，即 `{ type: 'cost-state', ... }`（与 cc-haha `saveCurrentSessionCosts()` 同形）。我在一份真实的 7MB transcript 上实测到 **9 个**检查点，从文件 20% 一直到末尾，且单调递增：
+
+| 位置 | totalAPIDuration | totalToolDuration | totalDuration | totalCostUSD |
+|---|---|---|---|---|
+| 20.4% | 5,331,376 ms | 728,692 ms | 7,239,144 ms | 161.14 |
+| 75.1% | 11,418,561 ms | 971,306 ms | 32,032,017 ms | 265.71 |
+| 100% | 13,391,238 ms | 1,638,254 ms | 35,385,403 ms | 268.64 |
+
+它还带 `modelUsage`（逐模型的 `inputTokens` / `outputTokens` / `cacheReadInputTokens` / `cacheCreationInputTokens` / `costUSD`），因此插件额外给出一份**运行时自己的累计命中率**作为交叉校验。
+
+**取最后一个检查点**（累计快照，最后一个才是当前状态），并用 `Σoutput / (totalAPIDuration/1000)` 算速率。
+
+**这个数字会明显低于直觉上的"解码速度"**，而且这是正确的：分母含 prefill，而这个会话累计 prompt 达 1.07 亿 token，按上式只有约 18 tok/s。所以界面上速率旁边**永远标注分母是什么**，避免被当成生成峰值。
+
+**降级是显式标注的**：实测 3 份 transcript 里有 2 份没有 `cost-state` 记录。此时插件回退到"会话时间跨度"口径，并把 `rateBasis` 标成 `wall-clock`，同时在页面上说明"含工具执行与空闲，不是生成速度"。
+
+**运行时累计命中率与主线程命中率会不同，而且两者都对** —— 前者是 Claude Code 自己按会话累计、包含子 agent 等全部模型的计费视角；后者是本页按主线程逐轮提取并去重后的口径。相差 ≥ 2 个百分点时页面会主动解释，不会把两者平均掉。
+
 ### ⚠️ 归因能力的边界（重要）
 
 cc-haha 在**请求发出前**对 system prompt 与工具 schema 做哈希，所以它能指出"是哪个工具的描述变了"。
@@ -225,15 +264,22 @@ cc-haha 在**请求发出前**对 system prompt 与工具 schema 做哈希，所
 ```json
 {
   "available": true, "turnCount": 4, "model": "claude-sonnet-4-5",
-  "hitRate": 0.99, "cacheRead": 33400000, "cacheCreation": 210000,
-  "promptTokens": 33700000, "newTokens": 1200000,
+  "hitRate": 0.539, "outputTokensPerSecond": 17.9, "rateBasis": "api-duration",
+  "apiDurationMs": 13391238, "toolDurationMs": 1638254, "sessionDurationMs": 35385403,
+  "runtimeHitRate": 0.539, "runtimeCostUSD": 268.64,
+  "cacheRead": 58045525, "cacheCreation": 6831683,
+  "promptTokens": 107595546, "newTokens": 40349442,
   "breaks": 0, "lostCachedTokens": 0,
-  "actualCostUSD": 12.34, "savedUSD": 87.65,
-  "chipText": "缓存命中 99.0%", "detailText": "4 轮 · 缓存读 33.4M · 新 1.2M"
+  "actualCostUSD": 268.64, "savedUSD": 87.65,
+  "chipText": "缓存命中 53.9% · 18 tok/s", "detailText": "4 轮 · 缓存读 58.0M · 新 40.3M"
 }
 ```
 
-按 transcript 的 `路径 + mtime + size` 缓存，会话不动时轮询几乎零成本；数字与插件标签页来自同一份分析，不会对不上。
+- `rateBasis` 取值 `api-duration` / `wall-clock` / `unavailable`，**消费方应把它显示出来**，否则一个含 prefill 的速率会被误读成解码峰值
+- 没选项目、没 transcript 都返回 `200` + `available:false` + `reason`，轮询方不需要处理异常分支
+- 按 transcript 的 `路径 + mtime + size` 缓存，会话不动时轮询几乎零成本
+- `chipText` / `detailText` 是插件预先拼好的文案（插件本身只有中文）；宿主若想自己组织文案，直接用上面的数字字段即可
+- 数字与插件标签页来自同一份分析，不会对不上
 
 ### `home` 参数
 
@@ -271,19 +317,21 @@ npm run test:e2e   # 真实 server 进程：就绪协议、各路由、错误形
 
 `npm test` 覆盖两层：
 
-- `test/analysis.test.mjs`（24 项）— 用合成 transcript 钉住上面 8 条口径，断言精确到 token 数与归因顺序
-- `test/frontend.test.mjs`（13 项）— 用 jsdom 挂载**编译后**的 `dist/index.js`，配假宿主 `api`，断言用户实际看到的内容；并守住两条硬约束：`dist/index.js` 不得含任何 `import` 语句、卸载后必须释放订阅与定时器
+- `test/analysis.test.mjs`（32 项）— 用合成 transcript 钉住上面 9 条口径，断言精确到 token 数、归因顺序与速率分母
+- `test/frontend.test.mjs`（14 项）— 用 jsdom 挂载**编译后**的 `dist/index.js`，配假宿主 `api`，断言用户实际看到的内容；并守住两条硬约束：`dist/index.js` 不得含任何 `import` 语句、卸载后必须释放订阅与定时器
 
-`test/e2e-server.mjs`（19 项）启动真实 `dist/server.js`，把 stdout 重定向到**文件**（而不是管道）来读就绪信号 —— 这既避开沙箱对命名管道的限制，也更贴近宿主逐行读 stdout 的真实做法。
+`test/e2e-server.mjs`（21 项）启动真实 `dist/server.js`，把 stdout 重定向到**文件**（而不是管道）来读就绪信号 —— 这既避开沙箱对命名管道的限制，也更贴近宿主逐行读 stdout 的真实做法。
 
 ### 验证状态
 
 | 检查 | 结果 |
 |---|---|
 | `npm run build`（清空 `dist/` 重建） | passed，`tsc` exit 0 |
-| `npm test` | passed 37/37 |
-| `npm run test:e2e` | passed 19/19 |
+| `npm test` | passed 46/46 |
+| `npm run test:e2e` | passed 21/21 |
+| 干净克隆安装（`git clone --depth 1` + 宿主同款 `npm install --ignore-scripts` + `npm run build`） | passed，manifest 三个路径全部解析 |
 | `icon.svg` 过宿主 DOMPurify 清洗 | 已用宿主同款配置实测：6 个图形全部保留、无禁用标签/属性、`currentColor` 生效 |
+| `cost-state` 字段与单调性 | 已在**真实 transcript** 上实测（7MB 文件里 9 个检查点） |
 | 在真实 CloudCLI UI 实例上安装 | **未验证** —— 本地没有可运行的宿主实例 |
 
 ### 两条实现约束（改代码前请先读）
@@ -308,17 +356,19 @@ cloudcli-plugin-cache-hit/
 │   ├── server.ts           后端：就绪协议 + RPC 路由
 │   └── analyze/            计算核心（口径都在这里）
 │       ├── usage.ts        usage 归一化、去重键、fork 判定
-│       ├── metrics.ts      命中率公式、格式化、成本聚合
+│       ├── metrics.ts      命中率与输出速率公式、格式化、成本聚合
 │       ├── pricing.ts      价目表（移植自 cc-haha modelCost.ts）
 │       ├── breaks.ts       断裂判定与归因
+│       ├── runtime.ts      读取 transcript 里的 cost-state 检查点（API 耗时/工具耗时/累计命中率）
 │       ├── transcript.ts   transcript 发现与解析
 │       └── summarize.ts    轮次提取、会话汇总、跨会话聚合
 ├── test/
-│   ├── analysis.test.mjs   口径回归测试（24 项）
-│   ├── frontend.test.mjs   渲染测试（13 项）
-│   └── e2e-server.mjs      真实进程端到端检查（19 项）
+│   ├── analysis.test.mjs   口径回归测试（32 项）
+│   ├── frontend.test.mjs   渲染测试（14 项）
+│   └── e2e-server.mjs      真实进程端到端检查（21 项）
 └── host-patch/
-    └── README.md           在输入框下方显示缓存命中的宿主补丁（可选，需改 CloudCLI UI）
+    ├── README.md           输入框下方常驻 chip 的宿主补丁（需改 CloudCLI UI）
+    └── cost-command.md     内置 /cost 弹窗加缓存命中率与输出速率的宿主补丁
 ```
 
 ---

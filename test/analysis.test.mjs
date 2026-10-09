@@ -17,7 +17,15 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { detectBreaks } from '../dist/analyze/breaks.js';
-import { formatCacheHitRate, hitRateOf, summarizeTotals, turnCost } from '../dist/analyze/metrics.js';
+import {
+  formatCacheHitRate,
+  formatTokensPerSecond,
+  hitRateOf,
+  summarizeTotals,
+  tokensPerSecond,
+  turnCost,
+} from '../dist/analyze/metrics.js';
+import { readRuntimeState } from '../dist/analyze/runtime.js';
 import { actualCostUSD, noCacheCostUSD, resolveModelRates } from '../dist/analyze/pricing.js';
 import { extractTurns, summarizeSessionFile } from '../dist/analyze/summarize.js';
 import { encodeProjectPath, parseTranscript } from '../dist/analyze/transcript.js';
@@ -93,6 +101,54 @@ function compactBoundaryLine(offsetSeconds) {
 }
 
 /**
+ * A `cost-state` checkpoint — the runtime's cumulative session telemetry, which
+ * Claude Code writes into the transcript. Same shape cc-haha persists from its
+ * cost tracker. It is the only source of an API-duration figure.
+ *
+ * `outputTokens / (totalAPIDuration / 1000)` is chosen to be exactly 50 for the
+ * final checkpoint and exactly 100 for the earlier one, so a "first wins"
+ * regression is caught.
+ */
+function costStateLine(options) {
+  const {
+    offsetSeconds = 0,
+    totalAPIDuration = 48400,
+    totalToolDuration = 1600,
+    totalDuration = 5000000,
+    totalCostUSD = 2.5,
+    model = 'claude-sonnet-4-5',
+    inputTokens = 100000,
+    outputTokens = 2420,
+    cacheReadInputTokens = 180000,
+    cacheCreationInputTokens = 20000,
+  } = options;
+  return {
+    type: 'cost-state',
+    sessionId: SESSION_ID,
+    timestamp: new Date(BASE_MS + offsetSeconds * 1000).toISOString(),
+    totalCostUSD,
+    totalAPIDuration,
+    totalAPIDurationWithoutRetries: totalAPIDuration - 2000,
+    totalToolDuration,
+    totalDuration,
+    totalLinesAdded: 10,
+    totalLinesRemoved: 2,
+    startTime: BASE_MS,
+    hasUnknownModelCost: false,
+    modelUsage: {
+      [model]: {
+        inputTokens,
+        outputTokens,
+        cacheReadInputTokens,
+        cacheCreationInputTokens,
+        webSearchRequests: 0,
+        costUSD: totalCostUSD,
+      },
+    },
+  };
+}
+
+/**
  * The scenario. Each row exists to pin one rule; the totals are asserted below.
  *
  *   T0  cold start                     prompt 25000, hit 0
@@ -141,6 +197,19 @@ function buildFixtureLines() {
   lines.push(
     assistantLine({ input: 500, cacheRead: 34000, cacheCreation: 2000, output: 200, model: 'claude-opus-4-5', offsetSeconds: 180 }),
   ); // T5
+  // Mid-file checkpoint: a DIFFERENT rate (100 tok/s) so "last wins" is testable.
+  lines.push(
+    costStateLine({
+      offsetSeconds: 200,
+      totalAPIDuration: 12000,
+      totalDuration: 900000,
+      totalCostUSD: 1.2,
+      inputTokens: 50000,
+      outputTokens: 1200,
+      cacheReadInputTokens: 90000,
+      cacheCreationInputTokens: 10000,
+    }),
+  );
   lines.push(
     assistantLine({ input: 1000, cacheRead: 2000, cacheCreation: 30000, output: 200, model: 'claude-opus-4-5', offsetSeconds: 180 + 360 }),
   ); // T6
@@ -172,6 +241,10 @@ function buildFixtureLines() {
     assistantLine({ input: 5000, cacheRead: 1000, cacheCreation: 20000, output: 100, model: 'claude-3-5-haiku-20241022', offsetSeconds: 180 + 360 + 30 + 4200 + 230 }),
   ); // T14
 
+  // Final checkpoint — the authoritative one. output / api = 2420 / 48.4 = 50 tok/s,
+  // and cacheRead / prompt = 180000 / 300000 = 0.6.
+  lines.push(costStateLine({ offsetSeconds: 180 + 360 + 30 + 4200 + 240 }));
+
   return lines;
 }
 
@@ -193,6 +266,16 @@ async function analyseFixture() {
     force: true,
   });
   return { fixture, summary };
+}
+
+/** Analyse an arbitrary line set, for the "no cost-state" degradation case. */
+async function analyseLines(lines) {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'cache-hit-noruntime-'));
+  const directory = path.join(home, '.claude', 'projects', encodeProjectPath(PROJECT_PATH));
+  await fsp.mkdir(directory, { recursive: true });
+  const file = path.join(directory, `${SESSION_ID}.jsonl`);
+  await fsp.writeFile(file, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
+  return summarizeSessionFile({ file, sessionId: SESSION_ID, projectPath: PROJECT_PATH, force: true });
 }
 
 /* ── Rule: bucket semantics ──────────────────────────────────────────────── */
@@ -379,6 +462,124 @@ test('a cold start is not a break', () => {
     { ...base, index: 1, line: 2, input: 200, output: 150, cacheRead: 24000, cacheCreation: 800, promptTokens: 25000, newTokens: 350, hitRate: 0.96 },
   ]);
   assert.equal(breaks.length, 0, 'the first hit after an uncached turn is not a regression');
+});
+
+/* ── Rule: output rate (cc-haha's tokensPerSecond contract) ─────────────── */
+
+test('tokensPerSecond mirrors cc-haha: API wall-clock, and null when unavailable', () => {
+  assert.equal(tokensPerSecond(2420, 48400), 50);
+  assert.equal(tokensPerSecond(0, 48400), null, 'no output means no rate, not 0');
+  assert.equal(tokensPerSecond(2420, 0), null, 'no API duration must report an absence, never wall clock');
+  assert.equal(tokensPerSecond(2420, -1), null);
+});
+
+test('formatTokensPerSecond matches cc-haha (one decimal only while small)', () => {
+  assert.equal(formatTokensPerSecond(283.4), '283');
+  assert.equal(formatTokensPerSecond(9.44), '9.4');
+  assert.equal(formatTokensPerSecond(10), '10');
+  assert.equal(formatTokensPerSecond(0), '--');
+  assert.equal(formatTokensPerSecond(null), '--');
+});
+
+test('readRuntimeState takes the LAST checkpoint, not the first', () => {
+  const lines = buildFixtureLines();
+  const parsed = parseTranscript(lines.map((line) => JSON.stringify(line)).join('\n'), false);
+  const runtime = readRuntimeState(parsed.lines);
+
+  assert.equal(runtime.present, true);
+  assert.equal(runtime.snapshots, 2, 'both checkpoints are counted');
+  // The mid-file checkpoint would give 1200/12 = 100 tok/s; the final gives 50.
+  assert.equal(runtime.totalAPIDurationMs, 48400);
+  assert.equal(runtime.totalOutputTokens, 2420);
+  assert.equal(runtime.totalToolDurationMs, 1600);
+  assert.equal(runtime.totalDurationMs, 5000000);
+  assert.equal(runtime.totalCostUSD, 2.5);
+  // prompt = 100000 + 180000 + 20000
+  assert.equal(runtime.promptTokens, 300000);
+  assert.equal(runtime.hitRate, 0.6);
+  assert.equal(runtime.models.length, 1);
+});
+
+test('readRuntimeState sums every model the runtime billed', async () => {
+  const parsed = parseTranscript(
+    JSON.stringify(
+      costStateLine({
+        model: 'claude-sonnet-4-5',
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheReadInputTokens: 200,
+        cacheCreationInputTokens: 300,
+      }),
+    ),
+    false,
+  );
+  // A second model in the same snapshot, written by hand.
+  const record = JSON.parse(JSON.stringify(costStateLine({})));
+  record.modelUsage['claude-haiku-4-5'] = {
+    inputTokens: 1000,
+    outputTokens: 80,
+    cacheReadInputTokens: 20000,
+    cacheCreationInputTokens: 0,
+    costUSD: 0.01,
+  };
+  record.modelUsage['claude-sonnet-4-5'] = {
+    inputTokens: 100,
+    outputTokens: 10,
+    cacheReadInputTokens: 200,
+    cacheCreationInputTokens: 300,
+    costUSD: 1,
+  };
+  const lines = [...parsed.lines, { line: 99, record }];
+  const runtime = readRuntimeState(lines);
+
+  assert.equal(runtime.models.length, 2);
+  assert.equal(runtime.cacheRead, 20200);
+  assert.equal(runtime.cacheCreation, 300);
+  assert.equal(runtime.totalOutputTokens, 90);
+  assert.equal(runtime.promptTokens, 100 + 1000 + 20200 + 300);
+  assert.ok(Math.abs(runtime.hitRate - 20200 / runtime.promptTokens) < 1e-12);
+});
+
+test('readRuntimeState reports absence rather than zeros', () => {
+  const parsed = parseTranscript('{"type":"assistant"}\n', false);
+  const runtime = readRuntimeState(parsed.lines);
+  assert.equal(runtime.present, false);
+  assert.equal(runtime.snapshots, 0);
+  assert.equal(runtime.hitRate, null);
+  assert.deepEqual(runtime.models, []);
+});
+
+test('the session rate comes from the runtime API duration when the transcript has it', async () => {
+  const { summary } = await analyseFixture();
+  assert.equal(summary.rateBasis, 'api-duration');
+  assert.equal(summary.outputTokensPerSecond, 50, '2420 output / 48.4s API');
+  assert.equal(summary.runtime.present, true);
+  assert.equal(summary.runtime.hitRate, 0.6);
+});
+
+test('without a cost-state checkpoint the rate falls back and says so', async () => {
+  const lines = buildFixtureLines().filter((line) => line.type !== 'cost-state');
+  const summary = await analyseLines(lines);
+
+  assert.equal(summary.runtime.present, false);
+  // Session span is 0s -> 5000s, output 2420.
+  assert.equal(summary.rateBasis, 'wall-clock');
+  assert.ok(Math.abs(summary.outputTokensPerSecond - 2420 / 5000) < 1e-12);
+  assert.ok(
+    summary.warnings.some((w) => w.includes('cost-state')),
+    'the degradation must be disclosed, not silent',
+  );
+  assert.ok(summary.warnings.some((w) => w.includes('工具执行')), 'and it must say what the denominator includes');
+});
+
+test('a differing runtime hit rate is disclosed rather than blended', async () => {
+  const { summary } = await analyseFixture();
+  // Main-thread extraction is 192500/423620 = 45.4%; the runtime checkpoint says 60%.
+  assert.ok(summary.totals.hitRate !== summary.runtime.hitRate);
+  assert.ok(
+    summary.warnings.some((w) => w.includes('运行时累计命中率')),
+    'the two scopes must be explained, not averaged together',
+  );
 });
 
 /* ── Rule: discovery ─────────────────────────────────────────────────────── */

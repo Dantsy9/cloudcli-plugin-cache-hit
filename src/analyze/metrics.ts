@@ -164,6 +164,31 @@ export function formatCacheHitRate(rate: number | null): string {
   return `${twoDecimals}%`;
 }
 
+/** `100`, `42`, `9.4` — one decimal only while the number is small enough to need it. */
+export function formatTokensPerSecond(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value <= 0) return '--';
+  return value >= 10 ? `${Math.round(value)}` : `${value.toFixed(1)}`;
+}
+
+/**
+ * Output tokens per second, using cc-haha's formula:
+ *
+ *     tokensPerSecond = output / (apiDurationMs / 1000)
+ *     null when apiDurationMs <= 0 or output <= 0
+ *
+ * Ported from `desktop/src/lib/sessionUsageMetrics.ts`, including the `null`
+ * contract: a caller with no API duration must report an absence rather than
+ * substitute wall-clock time that includes tool execution and idle.
+ *
+ * NOTE the denominator includes prefill. On a long agent session the prompt is
+ * re-sent and pre-filled every turn, so this figure is far below a decode-only
+ * peak — cc-haha makes the same trade deliberately, because a decode-only span
+ * "excludes TTFT and reads as a peak the user never felt".
+ */
+export function tokensPerSecond(outputTokens: number, apiDurationMs: number): number | null {
+  return apiDurationMs > 0 && outputTokens > 0 ? outputTokens / (apiDurationMs / 1000) : null;
+}
+
 /** `1.2M`, `375K`, `812` — compact enough for a stat row, never a lie about magnitude. */
 export function formatCompactTokens(value: number | null): string {
   if (value === null || !Number.isFinite(value) || value <= 0) return '0';

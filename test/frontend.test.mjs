@@ -64,6 +64,29 @@ async function makeFixture() {
     assistant(20000, 3000, 12000, 200, 90),
     assistant(150, 34000, 900, 120, 120),
     assistant(140, 35000, 800, 130, 150, 'claude-opus-4-5'),
+    // Cost checkpoint: 700 output / 14s API = exactly 50 tok/s.
+    {
+      type: 'cost-state',
+      sessionId: SESSION_ID,
+      timestamp: new Date(BASE_MS + 200 * 1000).toISOString(),
+      totalCostUSD: 1,
+      totalAPIDuration: 14000,
+      totalAPIDurationWithoutRetries: 13000,
+      totalToolDuration: 900,
+      totalDuration: 300000,
+      startTime: BASE_MS,
+      hasUnknownModelCost: false,
+      modelUsage: {
+        'claude-sonnet-4-5': {
+          inputTokens: 25490,
+          outputTokens: 700,
+          cacheReadInputTokens: 96000,
+          cacheCreationInputTokens: 34500,
+          webSearchRequests: 0,
+          costUSD: 1,
+        },
+      },
+    },
   ];
   const file = path.join(directory, `${SESSION_ID}.jsonl`);
   await fsp.writeFile(file, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
@@ -215,6 +238,28 @@ test('mount shows the hit rate, the break table and the raw JSONL line numbers',
     assert.ok(html.includes('源码行'), 'the break points back at the transcript line');
     assert.ok(html.includes('claude-opus-4-5'), 'per-model rows are listed');
     assert.ok(html.includes('按模型'), 'the model table is present');
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+test('the output rate renders with its denominator stated, next to the hit rate', async () => {
+  const home = (await makeFixture()).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const html = front.container.innerHTML;
+    assert.ok(html.includes('输出速率'), 'the rate KPI exists');
+    assert.ok(html.includes('50 tok/s'), `expected the runtime-derived rate, got: ${html.slice(0, 300)}`);
+    // The denominator is always on screen — a rate without its basis invites the
+    // reader to assume a decode-only peak.
+    assert.ok(html.includes('API 累计耗时'), 'the denominator is named');
+    assert.ok(html.includes('不含工具执行'), 'and its exclusions are stated');
+    assert.ok(html.includes('运行时累计命中率'), 'the runtime cross-check is shown separately');
+    assert.ok(html.includes('cost-state 检查点'), 'and its provenance is shown');
   } finally {
     front.module.unmount(front.container);
     front.cleanup();

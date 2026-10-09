@@ -54,6 +54,38 @@ function encodeProjectPath(projectPath) {
   return projectPath.replace(/[^a-zA-Z0-9-]/g, '-');
 }
 
+/**
+ * A `cost-state` checkpoint: the runtime's cumulative session telemetry, and the
+ * only source of an API-duration figure in a transcript.
+ * Chosen so output / api = 450 / 9 = exactly 50 tok/s.
+ */
+function costStateLine(offsetSeconds) {
+  return {
+    type: 'cost-state',
+    sessionId: SESSION_ID,
+    timestamp: new Date(BASE_MS + offsetSeconds * 1000).toISOString(),
+    totalCostUSD: 0.5,
+    totalAPIDuration: 9000,
+    totalAPIDurationWithoutRetries: 8500,
+    totalToolDuration: 1000,
+    totalDuration: 60000,
+    totalLinesAdded: 3,
+    totalLinesRemoved: 1,
+    startTime: BASE_MS,
+    hasUnknownModelCost: false,
+    modelUsage: {
+      'claude-sonnet-4-5': {
+        inputTokens: 25200,
+        outputTokens: 450,
+        cacheReadInputTokens: 27000,
+        cacheCreationInputTokens: 32800,
+        webSearchRequests: 0,
+        costUSD: 0.5,
+      },
+    },
+  };
+}
+
 async function makeFixtureHome() {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'cache-hit-e2e-'));
   const directory = path.join(home, '.claude', 'projects', encodeProjectPath(PROJECT_PATH));
@@ -64,6 +96,7 @@ async function makeFixtureHome() {
     assistant(5000, 0, 20000, 100, 0),
     assistant(200, 24000, 800, 150, 30),
     assistant(20000, 3000, 12000, 200, 90),
+    costStateLine(100),
   ];
   await fsp.writeFile(
     path.join(directory, `${SESSION_ID}.jsonl`),
@@ -257,10 +290,30 @@ async function main() {
     assert.equal(body.breaks, 1);
     assert.equal(body.lostCachedTokens, 21000);
     assert.equal(body.model, 'claude-sonnet-4-5');
-    assert.match(body.chipText, /^缓存命中 31\.8%$/, 'the chip label is ready to render');
+    assert.match(body.chipText, /^缓存命中 31\.8% · 50 tok\/s$/, 'the chip label carries both numbers');
     assert.match(body.detailText, /3 轮 · 缓存读 27\.0K/);
     assert.equal(body.truncated, false);
     assert.equal(typeof body.updatedAt, 'number');
+  });
+
+  await check('GET /status reports the output rate from the runtime API duration', async () => {
+    const { body } = await get(`/status?projectPath=${encodeURIComponent(PROJECT_PATH)}`);
+    assert.equal(body.rateBasis, 'api-duration', 'the honest denominator is used when available');
+    assert.equal(body.outputTokensPerSecond, 50, '450 output / 9s API');
+    assert.equal(body.apiDurationMs, 9000);
+    assert.equal(body.toolDurationMs, 1000);
+    assert.equal(body.sessionDurationMs, 60000);
+    assert.equal(body.runtimeCostUSD, 0.5);
+    assert.ok(Math.abs(body.runtimeHitRate - 27000 / 85000) < 1e-12);
+  });
+
+  await check('GET /session exposes the same rate and runtime telemetry', async () => {
+    const { body } = await get(`/session?projectPath=${encodeURIComponent(PROJECT_PATH)}`);
+    assert.equal(body.rateBasis, 'api-duration');
+    assert.equal(body.outputTokensPerSecond, 50);
+    assert.equal(body.runtime.present, true);
+    assert.equal(body.runtime.snapshots, 1);
+    assert.equal(body.runtime.models.length, 1);
   });
 
   await check('GET /status answers 200 with available:false instead of erroring', async () => {
