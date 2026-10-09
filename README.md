@@ -121,10 +121,11 @@ $HOME/.claude/projects/<项目绝对路径编码>/<会话id>.jsonl
 | 与其他插件通信 | 每个插件相互独立 |
 | 读用户 auth token / cookie | 宿主统一鉴权，从不暴露 |
 
-**结论：想让缓存数据常驻在对话框下方，或者想给内置的 `/cost` 弹窗加两行，都必须改动宿主。** 两份补丁、数据来源与维护成本：
+**结论：想让缓存数据常驻在对话框下方，或者想给内置的 `/cost` 弹窗加两行，都必须改动宿主。** 三份补丁、数据来源与维护成本：
 
 - [`host-patch/README.md`](host-patch/README.md) —— 在**输入框下方**加一个常驻 chip
 - [`host-patch/cost-command.md`](host-patch/cost-command.md) —— 给内置 **`/cost` 命令的弹窗**加「缓存命中率」与「输出速率」
+- [`host-patch/tab-tooltip.md`](host-patch/tab-tooltip.md) —— 让**标签页的悬停提示**显示实时命中率与速度
 
 替代路径对比：
 
@@ -294,6 +295,7 @@ cc-haha 在**请求发出前**对 system prompt 与工具 schema 做哈希，所
 - 所有路径参数都经过绝对路径校验 + 越界检查
 - `projectPath` 解析出的目录被强制限制在 `~/.claude/projects` 之下
 - 整个插件只在**自己的标签页**里工作：CloudCLI 的插件模型不允许修改内置标签页、不允许向对话发送消息、也没有侧边栏/状态栏插槽
+- **标签页的悬停提示是静态的** —— 内容就是 manifest 的 `displayName`（`WorkspaceTabs.tsx:113,120`），插件无法往里放实时数字。想要实时提示需改宿主，见 [`host-patch/tab-tooltip.md`](host-patch/tab-tooltip.md)
 - **想在对话框下方的输入栏里显示"缓存命中 99%"这类常驻一行，纯插件做不到** —— 那需要改动宿主。补丁内容、数据来源与成本分析见 [`host-patch/README.md`](host-patch/README.md)
 
 ### 已知限制
@@ -368,7 +370,8 @@ cloudcli-plugin-cache-hit/
 │   └── e2e-server.mjs      真实进程端到端检查（21 项）
 └── host-patch/
     ├── README.md           输入框下方常驻 chip 的宿主补丁（需改 CloudCLI UI）
-    └── cost-command.md     内置 /cost 弹窗加缓存命中率与输出速率的宿主补丁
+    ├── cost-command.md     内置 /cost 弹窗加缓存命中率与输出速率的宿主补丁
+    └── tab-tooltip.md      标签页悬停提示显示实时命中率与速度的宿主补丁
 ```
 
 ---
