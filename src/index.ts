@@ -281,12 +281,22 @@ function ensureStyles(): void {
 
 const CHART_MAX_TURNS = 320;
 
-function renderTurnChart(turns: TurnMetrics[], breaks: CacheBreak[], c: Palette, width: number): string {
+function renderTurnChart(
+  turns: TurnMetrics[],
+  breaks: CacheBreak[],
+  c: Palette,
+  width: number,
+  window: number | 'all',
+): string {
   if (turns.length === 0) return '';
+  // Keep only the most recent N turns when a window is selected; "all" shows
+  // everything. Slicing the tail (not the head) matches the user intent: for a
+  // live session the newest turns are the ones worth watching.
+  const windowed = typeof window === 'number' ? turns.slice(-window) : turns;
   // Sample down rather than let a 2000-turn session turn into a barcode.
-  const step = Math.max(1, Math.ceil(turns.length / CHART_MAX_TURNS));
+  const step = Math.max(1, Math.ceil(windowed.length / CHART_MAX_TURNS));
   const sampled: TurnMetrics[] = [];
-  for (let i = 0; i < turns.length; i += step) sampled.push(turns[i]!);
+  for (let i = 0; i < windowed.length; i += step) sampled.push(windowed[i]!);
 
   const height = 132;
   const padBottom = 18;
@@ -308,8 +318,12 @@ function renderTurnChart(turns: TurnMetrics[], breaks: CacheBreak[], c: Palette,
       `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${totalHeight.toFixed(2)}" fill="${c.surfaceAlt}" rx="1"><title>轮次 #${turn.index + 1} · prompt ${fmtFull(turn.promptTokens)} · 命中 ${fmtRate(turn.hitRate)} · ${esc(turn.model)}</title></rect>`,
     );
     if (cachedHeight > 0) {
+      // pointer-events=none: the cached (purple) bar sits ON TOP of the grey
+      // total bar, which carries the <title>. Without this, hovering the purple
+      // region hits a title-less rect and no tooltip shows — the grey bar's
+      // tooltip must win across the whole column.
       bars.push(
-        `<rect x="${x.toFixed(2)}" y="${(plotHeight - cachedHeight).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${cachedHeight.toFixed(2)}" fill="${c.accent}" rx="1" opacity="0.85"/>`,
+        `<rect x="${x.toFixed(2)}" y="${(plotHeight - cachedHeight).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${cachedHeight.toFixed(2)}" fill="${c.accent}" rx="1" opacity="0.85" pointer-events="none"/>`,
       );
     }
     if (breakIndices.has(turn.index)) {
@@ -336,13 +350,13 @@ function renderTurnChart(turns: TurnMetrics[], breaks: CacheBreak[], c: Palette,
 <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" preserveAspectRatio="none" role="img" aria-label="逐轮缓存命中率">
   <line x1="0" y1="${plotHeight}" x2="${width}" y2="${plotHeight}" stroke="${c.border}" stroke-width="1"/>
   ${bars.join('')}
-  ${points.length > 1 ? `<polyline points="${points.join(' ')}" fill="none" stroke="${c.good}" stroke-width="1.4" opacity="0.9"/>` : ''}
+  ${points.length > 1 ? `<polyline points="${points.join(' ')}" fill="none" stroke="${c.good}" stroke-width="1.4" opacity="0.9" pointer-events="none"/>` : ''}
   <text x="4" y="${height - 5}" fill="${c.faint}" font-size="10">#${first.index + 1}</text>
   <text x="${width - 4}" y="${height - 5}" fill="${c.faint}" font-size="10" text-anchor="end">#${last.index + 1}</text>
 </svg>
 <div class="ch-note" style="color:${c.faint};margin-top:4px">
   灰柱 = 该轮 prompt 总量，紫柱 = 其中命中缓存的部分，绿线 = 命中率，顶部红块 = 检测到缓存断裂。
-  ${step > 1 ? `已按每 ${step} 轮抽样显示（共 ${turns.length} 轮）。` : ''}
+  ${step > 1 ? `已按每 ${step} 轮抽样显示（共 ${windowed.length} 轮）。` : ''}
 </div>`;
 }
 
@@ -406,6 +420,12 @@ interface ViewState {
   health: HealthResponse | null;
   scope: 'session' | 'overview';
   overviewAll: boolean;
+  /** How many recent turns the per-turn chart plots. `'all'` disables the window. */
+  turnWindow: number | 'all';
+  /** Page size for the per-turn detail table. `'all'` shows every turn on one page. */
+  turnLogSize: number | 'all';
+  /** Zero-based page into the per-turn detail table (page 0 = the newest turns). */
+  turnLogPage: number;
   loading: boolean;
   error: { message: string; hint?: string } | null;
   autoRefresh: boolean;
@@ -428,6 +448,9 @@ export function mount(container: HTMLElement, api: PluginAPI): void {
     health: null,
     scope: 'session',
     overviewAll: false,
+    turnWindow: 10,
+    turnLogSize: 10,
+    turnLogPage: 0,
     loading: false,
     error: null,
     autoRefresh: true,
@@ -739,15 +762,26 @@ ${renderWarnings(c, summary.warnings)}
 
 <div class="ch-section" style="background:${c.surface};border-color:${c.border}">
   <div class="ch-section-head" style="border-color:${c.border};background:${c.surfaceAlt};color:${c.muted}">
-    <span>逐轮命中率</span>
+    <span style="display:inline-flex;align-items:center;gap:10px">
+      逐轮命中率
+      <select class="ch-select" id="ch-turns" style="background:${c.surface};border-color:${c.border};color:${c.text};font-weight:400">
+        ${([[10, '最近 10 轮'], [30, '最近 30 轮'], ['all', '全部']] as Array<[number | 'all', string]>)
+          .map(
+            ([value, label]) =>
+              `<option value="${value}"${state.turnWindow === value ? ' selected' : ''}>${label}</option>`,
+          )
+          .join('')}
+      </select>
+    </span>
     <span style="color:${c.faint};font-weight:400">
       加权 ${fmtRate(t.hitRate)} · 平均 ${fmtRate(t.meanTurnHitRate)} — 加权口径是"账单视角"：所有被计费的 prompt token 里有多少来自缓存
     </span>
   </div>
-  <div class="ch-section-body">${renderTurnChart(summary.turns, summary.breaks, c, 900)}</div>
+  <div class="ch-section-body">${renderTurnChart(summary.turns, summary.breaks, c, 900, state.turnWindow)}</div>
 </div>
 
 ${renderBreaks(c, summary.breaks)}
+${renderTurnLog(c, summary)}
 ${renderModels(c, summary.models, t)}
 ${renderCounts(c, summary)}
 ${renderMethodology(c)}`;
@@ -831,6 +865,102 @@ ${renderMethodology(c)}`;
       </tr></thead>
       <tbody style="color:${c.text}">${rows}</tbody>
     </table>
+  </div>
+</div>`;
+  }
+
+  const TURN_LOG_SIZES: Array<[number | 'all', string]> = [
+    [10, '10 条/页'],
+    [20, '20 条/页'],
+    [40, '40 条/页'],
+    [100, '100 条/页'],
+    ['all', '全部'],
+  ];
+
+  function renderTurnLog(c: Palette, summary: SessionSummary): string {
+    const turns = summary.turns;
+    const head = (right: string) => `
+<div class="ch-section" style="background:${c.surface};border-color:${c.border}">
+  <div class="ch-section-head" style="border-color:${c.border};background:${c.surfaceAlt};color:${c.muted}">
+    <span>逐轮明细（${turns.length}）</span>
+    ${right}
+  </div>`;
+
+    if (turns.length === 0) {
+      return `${head('')}
+  <div class="ch-section-body ch-note" style="color:${c.muted}">transcript 里没有可计量的轮次。</div>
+</div>`;
+    }
+
+    // Per-turn wall-clock speed, keyed by chronological position (turn.index).
+    // There is no per-turn API duration in a transcript, so the only honest
+    // denominator is the gap to the previous turn — which includes tool
+    // execution, thinking and idle. Labelled as such; never a decode peak.
+    const speeds = turns.map((turn, i) => {
+      if (i === 0) return null;
+      const prev = turns[i - 1]!;
+      if (turn.timestamp === null || prev.timestamp === null) return null;
+      const gapMs = turn.timestamp - prev.timestamp;
+      return gapMs > 0 && turn.output > 0 ? turn.output / (gapMs / 1000) : null;
+    });
+
+    const size = state.turnLogSize;
+    const total = turns.length;
+    const pageCount = size === 'all' ? 1 : Math.max(1, Math.ceil(total / size));
+    const page = Math.min(Math.max(0, state.turnLogPage), pageCount - 1);
+    state.turnLogPage = page; // keep state coherent after a size change or data shrink
+
+    const start = size === 'all' ? 0 : page * size;
+    const end = size === 'all' ? total : Math.min(total, start + size);
+    // Newest first, like the break table.
+    const ordered = turns.slice().reverse().slice(start, end);
+
+    const rows = ordered
+      .map((turn) => {
+        const speed = speeds[turn.index] ?? null;
+        return `
+<tr>
+  <td class="ch-num" style="color:${c.muted}">#${turn.index + 1}</td>
+  <td class="ch-num" style="color:${c.muted}">${fmtStamped(turn.timestamp)}</td>
+  <td class="ch-mono">${esc(turn.model)}</td>
+  <td class="ch-num" style="color:${c.accent}">${fmtRate(turn.hitRate)}</td>
+  <td class="ch-num">${speed === null ? '--' : fmtTokPerSec(speed)}</td>
+  <td class="ch-num">${fmtFull(turn.cacheRead)}</td>
+  <td class="ch-num">${fmtFull(turn.cacheCreation)}</td>
+  <td class="ch-num">${fmtUSD(turn.cost.actualUSD)}</td>
+</tr>`;
+      })
+      .join('');
+
+    const sizeSelect = `
+<select class="ch-select" id="ch-turnlog-size" style="background:${c.surface};border-color:${c.border};color:${c.text};font-weight:400">
+  ${TURN_LOG_SIZES.map(
+    ([value, label]) => `<option value="${value}"${state.turnLogSize === value ? ' selected' : ''}>${label}</option>`,
+  ).join('')}
+</select>`;
+
+    const pager =
+      size === 'all'
+        ? `<span class="ch-note" style="color:${c.muted}">共 ${total} 轮</span>`
+        : `
+<button class="ch-btn" id="ch-turnlog-prev" style="border-color:${c.border};color:${c.muted}"${page <= 0 ? ' disabled' : ''}>上一页</button>
+<span class="ch-note" style="color:${c.muted}">第 ${page + 1} / ${pageCount} 页 · 第 ${start + 1}–${end} / ${total} 轮</span>
+<button class="ch-btn" id="ch-turnlog-next" style="border-color:${c.border};color:${c.muted}"${page >= pageCount - 1 ? ' disabled' : ''}>下一页</button>`;
+
+    return `${head(sizeSelect)}
+  <div class="ch-section-body">
+    <div class="ch-scroll">
+      <table class="ch-table">
+        <thead><tr style="color:${c.muted}">
+          <th class="ch-num">轮次</th><th class="ch-num">时间</th><th>模型</th><th class="ch-num">命中率</th><th class="ch-num">速度</th><th class="ch-num">缓存读</th><th class="ch-num">缓存写</th><th class="ch-num">成本</th>
+        </tr></thead>
+        <tbody style="color:${c.text}">${rows}</tbody>
+      </table>
+    </div>
+    <div class="ch-row" style="justify-content:space-between;margin-top:10px">
+      <span class="ch-note" style="color:${c.faint};max-width:560px">速度 = 本轮 output ÷ 距上一轮的墙钟间隔（含工具执行、思考与空闲，不是解码速度）；首轮无上一轮，故为 --。缓存读/写为 token 原始量。</span>
+      <span class="ch-row" style="gap:8px">${pager}</span>
+    </div>
   </div>
 </div>`;
   }
@@ -1092,6 +1222,41 @@ ${renderMethodology(c)}`;
       allToggle.addEventListener('change', () => {
         state.overviewAll = allToggle.checked;
         void refresh(false);
+      });
+    }
+
+    // The turn window is a pure view preference: the summary is already loaded,
+    // so re-render locally rather than round-tripping to the backend.
+    const turnSelect = root.querySelector('#ch-turns') as HTMLSelectElement | null;
+    if (turnSelect) {
+      turnSelect.addEventListener('change', () => {
+        state.turnWindow = turnSelect.value === 'all' ? 'all' : Number(turnSelect.value);
+        render();
+      });
+    }
+
+    // Per-turn detail pagination — also pure view state, no RPC.
+    const logSize = root.querySelector('#ch-turnlog-size') as HTMLSelectElement | null;
+    if (logSize) {
+      logSize.addEventListener('change', () => {
+        state.turnLogSize = logSize.value === 'all' ? 'all' : Number(logSize.value);
+        state.turnLogPage = 0;
+        render();
+      });
+    }
+    const logPrev = root.querySelector('#ch-turnlog-prev');
+    if (logPrev) {
+      logPrev.addEventListener('click', () => {
+        state.turnLogPage = Math.max(0, state.turnLogPage - 1);
+        render();
+      });
+    }
+    const logNext = root.querySelector('#ch-turnlog-next');
+    if (logNext) {
+      // renderTurnLog clamps to the last page, so an over-increment is harmless.
+      logNext.addEventListener('click', () => {
+        state.turnLogPage += 1;
+        render();
       });
     }
   }

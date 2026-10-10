@@ -97,6 +97,27 @@ async function makeFixture(base = BASE_MS) {
   return { home, directory, file };
 }
 
+/**
+ * A fixture with `count` plain turns and nothing that trips break detection:
+ * one model, monotonically non-decreasing cacheRead, so every rendered bar is a
+ * turn (no red break markers to confuse a `轮次 #` count). Used to exercise the
+ * per-turn chart's turn-window selector.
+ */
+async function makeTurnsFixture(count) {
+  FIXTURE_BASE = BASE_MS;
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'cache-hit-ui-turns-'));
+  const directory = path.join(home, '.claude', 'projects', encodeProjectPath(PROJECT_PATH));
+  await fsp.mkdir(directory, { recursive: true });
+  const lines = [];
+  for (let i = 0; i < count; i += 1) {
+    // input 100, cacheRead grows, cacheCreation 200, output 50, 30s apart.
+    lines.push(assistant(100, 10000 + i * 500, 200, 50, i * 30));
+  }
+  const file = path.join(directory, `${SESSION_ID}.jsonl`);
+  await fsp.writeFile(file, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
+  return { home, directory, file };
+}
+
 /** Boot a jsdom document and import the compiled plugin module into it. */
 async function setupFrontend(home) {
   const dom = new JSDOM('<!doctype html><html><body><div id="host"></div></body></html>', {
@@ -658,5 +679,172 @@ test('icon.svg survives the host SVG sanitizer and adapts to the tab theme', asy
     assert.ok(svgText.includes('currentColor'), 'the icon must adapt to the theme');
   } finally {
     dom.window.close();
+  }
+});
+
+test('the cached (purple) bar lets the hover tooltip fall through to the total bar', async () => {
+  const home = (await makeTurnsFixture(12)).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const html = front.container.innerHTML;
+    assert.ok(html.includes('轮次 #'), 'the grey total bar carries the per-turn <title> tooltip');
+
+    // Dark theme accent = #7c6cf0 (the purple cached overlay). It sits on top of
+    // the titled grey bar, so it MUST be click-through or hovering the purple
+    // region surfaces no tooltip — the exact bug being fixed.
+    const purple = Array.from(front.container.querySelectorAll('svg rect')).filter(
+      (rect) => rect.getAttribute('fill') === '#7c6cf0',
+    );
+    assert.ok(purple.length > 0, 'the chart actually drew cached (purple) overlay bars');
+    for (const rect of purple) {
+      assert.equal(
+        rect.getAttribute('pointer-events'),
+        'none',
+        'the purple cached bar must not swallow the hover',
+      );
+    }
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+test('the per-turn chart defaults to the last 10 turns and the selector rescopes the window', async () => {
+  const home = (await makeTurnsFixture(35)).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const turnCount = () => (front.container.innerHTML.match(/轮次 #/g) || []).length;
+
+    // Default window: the most recent 10 of 35 turns, i.e. #26 → #35.
+    assert.equal(turnCount(), 10, 'the chart defaults to 10 turns');
+    assert.ok(front.container.innerHTML.includes('>#26<'), 'the default window starts at turn #26');
+    assert.ok(front.container.innerHTML.includes('>#35<'), 'and ends at the newest turn #35');
+
+    const callsBefore = front.calls.length;
+
+    const to = (value) => {
+      const select = front.container.querySelector('#ch-turns');
+      assert.ok(select, 'the turn-window selector is present');
+      select.value = value;
+      select.dispatchEvent(new front.dom.window.Event('change', { bubbles: true }));
+    };
+
+    to('30');
+    await settle();
+    assert.equal(turnCount(), 30, 'selecting 30 shows the most recent 30 turns');
+    assert.ok(front.container.innerHTML.includes('>#6<'), 'the 30-turn window starts at #6');
+
+    to('all');
+    await settle();
+    assert.equal(turnCount(), 35, 'selecting 全部 shows every turn');
+    assert.ok(front.container.innerHTML.includes('>#1<'), 'the full window starts at #1');
+
+    // Rescoping is a pure view change — it must not re-read the transcript.
+    assert.equal(front.calls.length, callsBefore, 'changing the window issues no new RPC');
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+/** The per-turn detail table, isolated from the per-model table by its 速度 column. */
+function turnLogTable(container) {
+  const tables = Array.from(container.querySelectorAll('table.ch-table'));
+  return tables.find((t) => (t.querySelector('thead')?.textContent || '').includes('速度')) ?? null;
+}
+
+test('the per-turn detail table lists newest-first and paginates 10 per page by default', async () => {
+  const home = (await makeTurnsFixture(35)).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    assert.ok(front.container.innerHTML.includes('逐轮明细（35）'), 'the section header shows the turn count');
+
+    const rows = () => turnLogTable(front.container).querySelectorAll('tbody tr');
+    assert.equal(rows().length, 10, 'the table defaults to 10 rows per page');
+    assert.ok(rows()[0].textContent.includes('#35'), 'the newest turn is first');
+    assert.ok(rows()[9].textContent.includes('#26'), 'and the page ends at #26');
+    assert.ok(front.container.innerHTML.includes('第 1 / 4 页'), '35 turns at 10/page is 4 pages');
+
+    // Numeric headers must be right-aligned to match their values (the project's
+    // hard alignment rule, otherwise the whole table reads as shifted).
+    const speedTh = Array.from(turnLogTable(front.container).querySelectorAll('th')).find(
+      (th) => th.textContent.trim() === '速度',
+    );
+    assert.ok(speedTh?.classList.contains('ch-num'), 'the 速度 header is right-aligned (ch-num)');
+
+    const callsBefore = front.calls.length;
+
+    front.container.querySelector('#ch-turnlog-next').dispatchEvent(
+      new front.dom.window.MouseEvent('click', { bubbles: true }),
+    );
+    await settle();
+    assert.ok(rows()[0].textContent.includes('#25'), 'page 2 starts at #25');
+    assert.ok(front.container.innerHTML.includes('第 2 / 4 页'), 'the pager advanced to page 2');
+
+    const sizeTo = (value) => {
+      const select = front.container.querySelector('#ch-turnlog-size');
+      assert.ok(select, 'the page-size selector exists');
+      select.value = value;
+      select.dispatchEvent(new front.dom.window.Event('change', { bubbles: true }));
+    };
+
+    sizeTo('20');
+    await settle();
+    assert.equal(rows().length, 20, '20/page shows 20 rows');
+    assert.ok(rows()[0].textContent.includes('#35'), 'changing the page size resets to the newest page');
+    assert.ok(front.container.innerHTML.includes('第 1 / 2 页'), '35 turns at 20/page is 2 pages');
+
+    sizeTo('all');
+    await settle();
+    assert.equal(rows().length, 35, '全部 shows every turn on one page');
+    assert.ok(front.container.innerHTML.includes('共 35 轮'), 'the 全部 view states the total');
+
+    assert.equal(front.calls.length, callsBefore, 'paginating issues no new RPC');
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+test('the per-turn speed is wall-clock, labelled, and null on the first turn', async () => {
+  const home = (await makeTurnsFixture(12)).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const html = front.container.innerHTML;
+    assert.ok(html.includes('速度 = 本轮 output'), 'the speed basis is spelled out');
+    assert.ok(html.includes('不是解码速度'), 'and it is explicitly not a decode rate');
+
+    // Show every turn so #1 (which has no previous turn) is on the page.
+    const select = front.container.querySelector('#ch-turnlog-size');
+    select.value = 'all';
+    select.dispatchEvent(new front.dom.window.Event('change', { bubbles: true }));
+    await settle();
+
+    const rows = turnLogTable(front.container).querySelectorAll('tbody tr');
+    assert.equal(rows.length, 12, 'all 12 turns are shown');
+
+    // Columns: 轮次 | 时间 | 模型 | 命中率 | 速度 | 缓存读 | 缓存写 | 成本.
+    const speedCell = (row) => row.querySelectorAll('td')[4].textContent.trim();
+    const first = rows[0]; // newest, #12
+    const last = rows[11]; // oldest, #1
+    assert.ok(last.textContent.includes('#1'), 'the last row is the first turn');
+    assert.equal(speedCell(last), '--', 'the first turn has no previous turn, so no wall-clock rate');
+    // 50 output over a 30s gap -> 1.7 tok/s.
+    assert.equal(speedCell(first), '1.7', 'later turns show output ÷ wall-clock gap');
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
   }
 });
