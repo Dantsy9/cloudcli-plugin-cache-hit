@@ -780,8 +780,8 @@ ${renderWarnings(c, summary.warnings)}
   <div class="ch-section-body">${renderTurnChart(summary.turns, summary.breaks, c, 900, state.turnWindow)}</div>
 </div>
 
-${renderBreaks(c, summary.breaks)}
 ${renderTurnLog(c, summary)}
+${renderBreaks(c, summary.breaks)}
 ${renderModels(c, summary.models, t)}
 ${renderCounts(c, summary)}
 ${renderMethodology(c)}`;
