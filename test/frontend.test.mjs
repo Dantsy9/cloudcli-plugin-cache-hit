@@ -465,6 +465,91 @@ test('theme changes switch the palette without a reload', async () => {
   }
 });
 
+test('numeric table headers are right-aligned like their values', async () => {
+  // Regression: `.ch-table th` is specificity (0,1,1) and silently outranked the
+  // bare `.ch-num` (0,1,0), so every numeric header stayed left-aligned while its
+  // column's values hugged the right edge — the whole table read as shifted.
+  // Measured in Chrome before/after: th computed `text-align: left` against a
+  // `text-align: right` td, then `right`/`right` once the rule was restated at
+  // equal specificity. jsdom does no layout, so this asserts the two invariants
+  // that made it fail rather than the rendered pixels.
+  const home = (await makeFixture()).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const style = front.dom.window.document.getElementById('cache-hit-styles');
+    assert.ok(style, 'the stylesheet is injected');
+    // Strip comments first: they sit in the same chunk as the following selector
+    // and would otherwise be matched as part of it.
+    const css = (style.textContent ?? '').replace(/\/\*[\s\S]*?\*\//g, '');
+
+    // (a) A right-align rule that can actually win over `.ch-table th`.
+    const rules = css
+      .split('}')
+      .map((chunk) => chunk.split('{'))
+      .filter((parts) => parts.length === 2)
+      .map(([selector, body]) => ({ selector: selector.trim(), body: body.trim() }));
+    const winning = rules.filter(
+      (rule) => /th\.ch-num\b/.test(rule.selector) && /text-align:\s*right/.test(rule.body),
+    );
+    assert.ok(
+      winning.length > 0,
+      'the stylesheet must restate right-alignment for th.ch-num, or headers lose to `.ch-table th`',
+    );
+
+    // (b) Every numeric column's header carries the class. A table added with a
+    //     `ch-num` body cell and a plain `<th>` would regress silently.
+    const tables = front.container.querySelectorAll('.ch-table');
+    assert.ok(tables.length > 0, 'at least one table is rendered');
+    let numericColumns = 0;
+    for (const table of tables) {
+      const headRow = table.querySelector('thead tr');
+      const bodyRow = table.querySelector('tbody tr');
+      if (!headRow || !bodyRow) continue;
+      const heads = headRow.children;
+      const cells = bodyRow.children;
+      for (let i = 0; i < cells.length; i += 1) {
+        if (!cells[i]?.classList.contains('ch-num')) continue;
+        numericColumns += 1;
+        assert.ok(
+          heads[i]?.classList.contains('ch-num'),
+          `column ${i} ("${heads[i]?.textContent?.trim()}") has a ch-num value cell but its header does not`,
+        );
+      }
+    }
+    assert.ok(numericColumns >= 6, `expected the numeric columns to be covered, saw ${numericColumns}`);
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+test('the parsing breakdown keeps its numbers in one aligned column', async () => {
+  // Regression: the value and its note shared a single right-aligned cell, so each
+  // value was pushed left by the width of its own note and rows with a note never
+  // lined up with rows without one. The fix gives the value its own grid track.
+  const home = (await makeFixture()).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const grid = front.container.querySelector('.ch-kv3');
+    assert.ok(grid, 'the breakdown uses the three-track grid');
+    const children = Array.from(grid.children);
+    assert.ok(children.length > 0 && children.length % 3 === 0, `label/value/note triples, got ${children.length} cells`);
+    for (let i = 0; i < children.length; i += 3) {
+      assert.ok(children[i + 1]?.classList.contains('ch-num'), `row ${i / 3} value cell is right-aligned in its own track`);
+      assert.notEqual(children[i + 1], children[i + 2], 'the note lives in its own track, not inside the value cell');
+    }
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
 test('icon.svg survives the host SVG sanitizer and adapts to the tab theme', async () => {
   // The host renders plugin icons by fetching the file and passing it through
   // DOMPurify with a restricted SVG profile (`src/modules/plugins/PluginIcon.tsx`).

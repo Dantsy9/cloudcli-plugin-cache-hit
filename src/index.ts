@@ -214,6 +214,13 @@ function ensureStyles(): void {
 .ch-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .ch-table th { text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 10px 6px 0; border-bottom: 1px solid; white-space: nowrap; }
 .ch-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid; vertical-align: top; }
+/* Numeric header cells must match their right-aligned values.
+   '.ch-table th' is specificity (0,1,1) and outranks a bare '.ch-num' (0,1,0),
+   so the alignment has to be restated at equal specificity. Without this rule
+   every numeric header stays left-aligned while its column's values hug the
+   right edge — measured in Chrome, th computed text-align: left against a
+   text-align: right td, which is what made the whole table read as shifted. */
+.ch-table th.ch-num, .ch-table td.ch-num { text-align: right; }
 .ch-table tr:last-child td { border-bottom: none; }
 .ch-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ch-break-detail { font-size: 11.5px; line-height: 1.55; max-width: 620px; }
@@ -224,6 +231,11 @@ function ensureStyles(): void {
 .ch-details[open] summary { margin-bottom: 10px; }
 .ch-scroll { overflow-x: auto; }
 .ch-kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 11.5px; }
+/* Three tracks for label | value | note. The value gets its own track so the
+   numbers form one aligned column; putting the value and its note in a single
+   right-aligned cell pushed each value left by the width of its note, so rows
+   with a note never lined up with rows without one. */
+.ch-kv3 { display: grid; grid-template-columns: auto minmax(3.5rem, max-content) 1fr; gap: 3px 14px; font-size: 11.5px; }
 `;
   document.head.appendChild(style);
 }
@@ -778,7 +790,7 @@ ${renderMethodology(c)}`;
   <div class="ch-section-body ch-scroll">
     <table class="ch-table">
       <thead><tr style="color:${c.muted}">
-        <th>轮次</th><th>时间</th><th>归因</th><th class="ch-num">命中读</th><th class="ch-num">丢失</th><th class="ch-num">间隔</th><th class="ch-num">额外成本</th><th>说明</th>
+        <th class="ch-num">轮次</th><th class="ch-num">时间</th><th>归因</th><th class="ch-num">命中读</th><th class="ch-num">丢失</th><th class="ch-num">间隔</th><th class="ch-num">额外成本</th><th>说明</th>
       </tr></thead>
       <tbody style="color:${c.text}">${rows}</tbody>
     </table>
@@ -852,8 +864,18 @@ ${renderMethodology(c)}`;
     <span>解析明细</span><span style="color:${c.faint};font-weight:400">每一行被计入或排除的原因</span>
   </div>
   <div class="ch-section-body">
-    <div class="ch-kv">
-      ${items.map(([label, value, note]) => `<span style="color:${c.muted}">${esc(label)}</span><span class="ch-num" style="color:${c.text}">${fmtFull(value)}${note ? ` <span class="ch-note" style="color:${c.faint}">${esc(note)}</span>` : ''}</span>`).join('')}
+    <div class="ch-kv3">
+      ${items
+        .map(
+          ([label, value, note]) =>
+            `<span style="color:${c.muted}">${esc(label)}</span>` +
+            // The value gets its own track so all of them form one aligned column;
+            // the note gets a third track instead of trailing the value inside a
+            // right-aligned cell, which pushed each value left by its note's width.
+            `<span class="ch-num" style="color:${c.text}">${fmtFull(value)}</span>` +
+            `<span class="ch-note" style="color:${c.faint}">${note ? esc(note) : ''}</span>`,
+        )
+        .join('')}
     </div>
   </div>
 </div>`;

@@ -313,14 +313,14 @@ cc-haha 在**请求发出前**对 system prompt 与工具 schema 做哈希，所
 npm install
 npm run build      # tsc -> dist/
 npm run dev        # tsc --watch
-npm test           # 分析口径 + 前端渲染测试（37 项）
+npm test           # 分析口径 + 前端渲染测试（48 项）
 npm run test:e2e   # 真实 server 进程：就绪协议、各路由、错误形状、SIGTERM 关停
 ```
 
 `npm test` 覆盖两层：
 
 - `test/analysis.test.mjs`（32 项）— 用合成 transcript 钉住上面 9 条口径，断言精确到 token 数、归因顺序与速率分母
-- `test/frontend.test.mjs`（14 项）— 用 jsdom 挂载**编译后**的 `dist/index.js`，配假宿主 `api`，断言用户实际看到的内容；并守住两条硬约束：`dist/index.js` 不得含任何 `import` 语句、卸载后必须释放订阅与定时器
+- `test/frontend.test.mjs`（16 项）— 用 jsdom 挂载**编译后**的 `dist/index.js`，配假宿主 `api`，断言用户实际看到的内容；并守住三条硬约束：`dist/index.js` 不得含任何 `import` 语句、卸载后必须释放订阅与定时器、**数值列的表头必须与数值同向对齐**
 
 `test/e2e-server.mjs`（21 项）启动真实 `dist/server.js`，把 stdout 重定向到**文件**（而不是管道）来读就绪信号 —— 这既避开沙箱对命名管道的限制，也更贴近宿主逐行读 stdout 的真实做法。
 
@@ -329,12 +329,19 @@ npm run test:e2e   # 真实 server 进程：就绪协议、各路由、错误形
 | 检查 | 结果 |
 |---|---|
 | `npm run build`（清空 `dist/` 重建） | passed，`tsc` exit 0 |
-| `npm test` | passed 46/46 |
+| `npm test` | passed 48/48 |
 | `npm run test:e2e` | passed 21/21 |
 | 干净克隆安装（`git clone --depth 1` + 宿主同款 `npm install --ignore-scripts` + `npm run build`） | passed，manifest 三个路径全部解析 |
+| **真实 Chrome 布局校验** | passed —— 用 headless Chrome + DevTools Protocol 量了每张表每个单元格的 `getBoundingClientRect()` 与 computed `text-align`（见下方"已知修复"） |
 | `icon.svg` 过宿主 DOMPurify 清洗 | 已用宿主同款配置实测：6 个图形全部保留、无禁用标签/属性、`currentColor` 生效 |
 | `cost-state` 字段与单调性 | 已在**真实 transcript** 上实测（7MB 文件里 9 个检查点） |
-| 在真实 CloudCLI UI 实例上安装 | **未验证** —— 本地没有可运行的宿主实例 |
+| 在真实 CloudCLI UI 实例上安装 | **已验证** —— 用户实例截图确认渲染与数字正确 |
+
+### 已知修复
+
+**数值列表头与数值方向不一致**（2026-10）。`.ch-table th` 的 specificity 是 (0,1,1)，压过了单独的 `.ch-num` (0,1,0)，结果是**每一张表的数值列表头都停在左对齐、而数值贴右** —— 整张表看起来就是错位的。用 headless Chrome 实测确认：修复前表头 computed `text-align: left` 而单元格 `right`；修复后两者都是 `right`。
+
+同批修的另一处：解析明细里数值与其说明文字共用一个右对齐单元格，导致每个数值被自己说明的宽度往左推，**有说明的行永远对不齐没说明的行**。现改为三栏网格（标签 / 数值 / 说明），数值单独成列。
 
 ### 两条实现约束（改代码前请先读）
 
