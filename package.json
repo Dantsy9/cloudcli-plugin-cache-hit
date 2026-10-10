@@ -8,7 +8,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node test/analysis.test.mjs && node test/frontend.test.mjs",
-    "test:e2e": "node test/e2e-server.mjs"
+    "test:e2e": "node test/e2e-server.mjs",
+    "verify:layout": "node scripts/verify-layout.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

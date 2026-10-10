@@ -35,3 +35,6 @@ desktop.ini
 # this is belt-and-braces in case a run is interrupted mid-copy.
 test/.tmp/
 coverage/
+
+# Layout-verification output (scripts/verify-layout.mjs)
+artifacts/

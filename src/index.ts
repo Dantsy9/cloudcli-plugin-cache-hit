@@ -85,12 +85,49 @@ function fmtClock(ms: number | null): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function fmtAgo(ms: number): string {
-  const seconds = Math.floor((Date.now() - ms) / 1000);
-  if (seconds < 60) return '刚刚';
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
-  return `${Math.floor(seconds / 86400)} 天前`;
+/**
+ * `10-09`, or `2025-10-09` when the year is not the current one.
+ *
+ * Comparing against the current year rather than the session's is deliberate: a
+ * timestamp shown without its year is only unambiguous inside the current year.
+ */
+function fmtDay(ms: number, now = Date.now()): string {
+  const d = new Date(ms);
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const md = `${month}-${day}`;
+  return d.getFullYear() === new Date(now).getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}
+
+/**
+ * `10-09 11:47:09` — a bare clock time is never enough.
+ *
+ * A transcript can be resumed days later, and a long session can cross midnight,
+ * so `11:47:09` alone leaves the reader unable to tell which day a cache break
+ * happened on. The date is therefore always present.
+ */
+function fmtStamped(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return '--';
+  return `${fmtDay(ms)} ${fmtClock(ms)}`;
+}
+
+/** `10-09 10:58 → 11:01`, or both sides dated when the range crosses a day. */
+function fmtRange(start: number | null, end: number | null): string {
+  if (start === null || end === null || !Number.isFinite(start) || !Number.isFinite(end)) {
+    return `${fmtClock(start)} → ${fmtClock(end)}`;
+  }
+  if (fmtDay(start) === fmtDay(end)) return `${fmtDay(start)} ${fmtClock(start)} → ${fmtClock(end)}`;
+  return `${fmtStamped(start)} → ${fmtStamped(end)}`;
+}
+
+/**
+ * `10-09 17:07` — date plus minute precision, for list rows.
+ *
+ * The session picker used to show a relative age only ("47 天前"), which is
+ * exactly the case where a reader needs the calendar date.
+ */
+function fmtDayMinute(ms: number): string {
+  return `${fmtDay(ms)} ${fmtClock(ms).slice(0, 5)}`;
 }
 
 function fmtBytes(bytes: number): string {
@@ -509,7 +546,7 @@ export function mount(container: HTMLElement, api: PluginAPI): void {
 
     const sessionOptions = state.sessions
       .map((item) => {
-        const label = `${item.sessionId.slice(0, 8)} · ${fmtAgo(item.mtime)} · ${fmtBytes(item.size)}${item.active ? ' · ● 活动' : ''}`;
+        const label = `${item.sessionId.slice(0, 8)} · ${fmtDayMinute(item.mtime)} · ${fmtBytes(item.size)}${item.active ? ' · ● 活动' : ''}`;
         const selected = item.sessionId === state.sessionId ? ' selected' : '';
         return `<option value="${esc(item.sessionId)}"${selected}>${esc(label)}</option>`;
       })
@@ -672,7 +709,7 @@ ${renderWarnings(c, summary.warnings)}
     <div class="ch-kv" style="color:${c.muted};margin-top:12px">
       <span>transcript</span><span class="ch-mono" style="color:${c.text};word-break:break-all">${esc(summary.transcript.file)}</span>
       <span>会话 id</span><span class="ch-mono" style="color:${c.text}">${esc(summary.sessionId)}</span>
-      <span>时间范围</span><span class="ch-num" style="color:${c.text}">${fmtClock(summary.startedAt)} → ${fmtClock(summary.endedAt)}</span>
+      <span>时间范围</span><span class="ch-num" style="color:${c.text}">${fmtRange(summary.startedAt, summary.endedAt)}</span>
       <span>average 单轮命中率</span><span class="ch-num" style="color:${c.text}">${fmtRate(t.meanTurnHitRate)}</span>
       <span>文件大小</span><span class="ch-num" style="color:${c.text}">${fmtBytes(summary.transcript.size)}</span>
       <span>断裂次数</span><span class="ch-num" style="color:${summary.breaks.length ? c.bad : c.good}">${fmtFull(summary.breaks.length)}</span>
@@ -762,7 +799,7 @@ ${renderMethodology(c)}`;
         return `
 <tr>
   <td class="ch-num" style="color:${c.muted}">#${b.turnIndex + 1}</td>
-  <td class="ch-num" style="color:${c.muted}">${fmtClock(b.timestamp)}</td>
+  <td class="ch-num" style="color:${c.muted}">${fmtStamped(b.timestamp)}</td>
   <td>
     <span class="ch-chip" style="border-color:${color};color:${color}">${esc(causeLabel(b.cause))}</span>
   </td>

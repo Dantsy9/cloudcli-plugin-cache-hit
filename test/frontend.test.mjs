@@ -31,11 +31,14 @@ const PROJECT_PATH = 'D:\\demo\\ui';
 const SESSION_ID = 'ui-session';
 const BASE_MS = Date.parse('2026-05-02T09:00:00.000Z');
 
+/** Overridden by `makeFixture(base)` so a test can place the session anywhere. */
+let FIXTURE_BASE = BASE_MS;
+
 function assistant(input, cacheRead, cacheCreation, output, offsetSeconds, model = 'claude-sonnet-4-5') {
   return {
     type: 'assistant',
     uuid: `u-${offsetSeconds}`,
-    timestamp: new Date(BASE_MS + offsetSeconds * 1000).toISOString(),
+    timestamp: new Date(FIXTURE_BASE + offsetSeconds * 1000).toISOString(),
     sessionId: SESSION_ID,
     requestId: `req-${offsetSeconds}`,
     version: '1.0.24',
@@ -54,7 +57,8 @@ function assistant(input, cacheRead, cacheCreation, output, offsetSeconds, model
   };
 }
 
-async function makeFixture() {
+async function makeFixture(base = BASE_MS) {
+  FIXTURE_BASE = base;
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'cache-hit-ui-'));
   const directory = path.join(home, '.claude', 'projects', encodeProjectPath(PROJECT_PATH));
   await fsp.mkdir(directory, { recursive: true });
@@ -68,13 +72,13 @@ async function makeFixture() {
     {
       type: 'cost-state',
       sessionId: SESSION_ID,
-      timestamp: new Date(BASE_MS + 200 * 1000).toISOString(),
+      timestamp: new Date(FIXTURE_BASE + 200 * 1000).toISOString(),
       totalCostUSD: 1,
       totalAPIDuration: 14000,
       totalAPIDurationWithoutRetries: 13000,
       totalToolDuration: 900,
       totalDuration: 300000,
-      startTime: BASE_MS,
+      startTime: FIXTURE_BASE,
       hasUnknownModelCost: false,
       modelUsage: {
         'claude-sonnet-4-5': {
@@ -459,6 +463,72 @@ test('theme changes switch the palette without a reload', async () => {
     const lightBackground = front.container.firstElementChild.style.background;
     assert.match(lightBackground, /#fafaf8|250,\s*250,\s*248/, `light palette applied, got "${lightBackground}"`);
     assert.notEqual(darkBackground, lightBackground);
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+test('timestamps always carry a date, so a resumed session is placeable in time', async () => {
+  // Regression: the break table showed `11:47:09` and the metadata card showed
+  // `10:58 → 11:01`. A transcript resumed days later, or a session crossing
+  // midnight, becomes unreadable that way — you cannot tell which day it was.
+  const home = (await makeFixture()).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const html = front.container.innerHTML;
+    const stamped = /(\d{4}-)?\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
+
+    // The break table's 时间 cell.
+    const breakTable = Array.from(front.container.querySelectorAll('.ch-table')).find((table) =>
+      (table.querySelector('thead')?.textContent ?? '').includes('归因'),
+    );
+    assert.ok(breakTable, 'the break table is rendered');
+    const timeCells = Array.from(breakTable.querySelectorAll('tbody tr')).map((row) => row.children[1]?.textContent?.trim() ?? '');
+    assert.ok(timeCells.length > 0, 'the fixture produced at least one break');
+    for (const cell of timeCells) {
+      assert.match(cell, stamped, `break time "${cell}" must carry a date`);
+    }
+
+    // The session metadata range.
+    const range = /(\d{4}-)?\d{2}-\d{2} \d{2}:\d{2}/;
+    assert.ok(range.test(html), 'the session time range must carry a date');
+
+    // The session picker: a relative age ("47 天前") is exactly the case where
+    // the reader needs a calendar date.
+    assert.ok(!/\d+ 天前/.test(html), 'the picker must not fall back to a bare relative age');
+  } finally {
+    front.module.unmount(front.container);
+    front.cleanup();
+  }
+});
+
+test('a range crossing midnight dates both ends', async () => {
+  // Built from LOCAL components so the assertion holds in any timezone: the
+  // session starts at local 23:58 and its last turn lands at 00:00:30 the next
+  // day. A range rendered as `23:58:00 → 00:00:30` would be actively misleading.
+  const start = new Date(2026, 4, 2, 23, 58, 0).getTime();
+  const home = (await makeFixture(start)).home;
+  const front = await setupFrontend(home);
+  try {
+    await front.module.mount(front.container, front.api);
+    await settle();
+
+    const html = front.container.innerHTML;
+    assert.ok(
+      html.includes('05-02 23:58:00 → 05-03 00:00:30'),
+      'a range that crosses midnight must date both ends, otherwise it reads as going backwards',
+    );
+
+    // The single break in the fixture sits at +90s, still before midnight.
+    const breakTable = Array.from(front.container.querySelectorAll('.ch-table')).find((table) =>
+      (table.querySelector('thead')?.textContent ?? '').includes('归因'),
+    );
+    const cell = breakTable?.querySelector('tbody tr')?.children[1]?.textContent?.trim() ?? '';
+    assert.equal(cell, '05-02 23:59:30', `the break cell must carry its own date, got "${cell}"`);
   } finally {
     front.module.unmount(front.container);
     front.cleanup();

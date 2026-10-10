@@ -313,14 +313,15 @@ cc-haha 在**请求发出前**对 system prompt 与工具 schema 做哈希，所
 npm install
 npm run build      # tsc -> dist/
 npm run dev        # tsc --watch
-npm test           # 分析口径 + 前端渲染测试（48 项）
+npm test           # 分析口径 + 前端渲染测试（50 项）
 npm run test:e2e   # 真实 server 进程：就绪协议、各路由、错误形状、SIGTERM 关停
+npm run verify:layout -- --screenshot   # 真实 Chrome 里量表格对齐（需要本机有 Chrome/Edge）
 ```
 
 `npm test` 覆盖两层：
 
 - `test/analysis.test.mjs`（32 项）— 用合成 transcript 钉住上面 9 条口径，断言精确到 token 数、归因顺序与速率分母
-- `test/frontend.test.mjs`（16 项）— 用 jsdom 挂载**编译后**的 `dist/index.js`，配假宿主 `api`，断言用户实际看到的内容；并守住三条硬约束：`dist/index.js` 不得含任何 `import` 语句、卸载后必须释放订阅与定时器、**数值列的表头必须与数值同向对齐**
+- `test/frontend.test.mjs`（18 项）— 用 jsdom 挂载**编译后**的 `dist/index.js`，配假宿主 `api`，断言用户实际看到的内容；并守住四条硬约束：`dist/index.js` 不得含任何 `import` 语句、卸载后必须释放订阅与定时器、数值列的表头必须与数值同向对齐、**时间戳必须带日期**
 
 `test/e2e-server.mjs`（21 项）启动真实 `dist/server.js`，把 stdout 重定向到**文件**（而不是管道）来读就绪信号 —— 这既避开沙箱对命名管道的限制，也更贴近宿主逐行读 stdout 的真实做法。
 
@@ -329,10 +330,10 @@ npm run test:e2e   # 真实 server 进程：就绪协议、各路由、错误形
 | 检查 | 结果 |
 |---|---|
 | `npm run build`（清空 `dist/` 重建） | passed，`tsc` exit 0 |
-| `npm test` | passed 48/48 |
+| `npm test` | passed 50/50 |
 | `npm run test:e2e` | passed 21/21 |
 | 干净克隆安装（`git clone --depth 1` + 宿主同款 `npm install --ignore-scripts` + `npm run build`） | passed，manifest 三个路径全部解析 |
-| **真实 Chrome 布局校验** | passed —— 用 headless Chrome + DevTools Protocol 量了每张表每个单元格的 `getBoundingClientRect()` 与 computed `text-align`（见下方"已知修复"） |
+| **真实 Chrome 布局校验**（`npm run verify:layout`） | passed —— 用 headless Chrome + DevTools Protocol 量每张表每个单元格的 `getBoundingClientRect()` 与 computed `text-align`，断言数值列的**表头与数值同向**；可加 `--screenshot` 输出 PNG 供肉眼复核（见下方"已知修复"） |
 | `icon.svg` 过宿主 DOMPurify 清洗 | 已用宿主同款配置实测：6 个图形全部保留、无禁用标签/属性、`currentColor` 生效 |
 | `cost-state` 字段与单调性 | 已在**真实 transcript** 上实测（7MB 文件里 9 个检查点） |
 | 在真实 CloudCLI UI 实例上安装 | **已验证** —— 用户实例截图确认渲染与数字正确 |
@@ -342,6 +343,12 @@ npm run test:e2e   # 真实 server 进程：就绪协议、各路由、错误形
 **数值列表头与数值方向不一致**（2026-10）。`.ch-table th` 的 specificity 是 (0,1,1)，压过了单独的 `.ch-num` (0,1,0)，结果是**每一张表的数值列表头都停在左对齐、而数值贴右** —— 整张表看起来就是错位的。用 headless Chrome 实测确认：修复前表头 computed `text-align: left` 而单元格 `right`；修复后两者都是 `right`。
 
 同批修的另一处：解析明细里数值与其说明文字共用一个右对齐单元格，导致每个数值被自己说明的宽度往左推，**有说明的行永远对不齐没说明的行**。现改为三栏网格（标签 / 数值 / 说明），数值单独成列。
+
+**时间戳看不出日期**（2026-10）。断裂表的「时间」列与「时间范围」原本只显示 `HH:MM:SS`。会话可以被隔几天 resume，长会话还会跨午夜，于是 `11:47:09` 根本无法判断是哪一天 —— 对几天前的会话尤其无用。现在：
+
+- 断裂表每行显示 `10-09 18:01:00`（**始终带日期**；年份与当前年份不同时补 `YYYY-`）
+- 时间范围同日显示 `10-09 17:00:00 → 18:01:00`，**跨午夜则两端都带日期**
+- 会话下拉从「47 天前」改成 `10-09 17:07` —— 越久远的数据越需要日历日期，而这正是相对时间最无用的场合
 
 ### 两条实现约束（改代码前请先读）
 
@@ -373,8 +380,10 @@ cloudcli-plugin-cache-hit/
 │       └── summarize.ts    轮次提取、会话汇总、跨会话聚合
 ├── test/
 │   ├── analysis.test.mjs   口径回归测试（32 项）
-│   ├── frontend.test.mjs   渲染测试（14 项）
+│   ├── frontend.test.mjs   渲染测试（18 项）
 │   └── e2e-server.mjs      真实进程端到端检查（21 项）
+├── scripts/
+│   └── verify-layout.mjs   在真实 Chrome 里量表格对齐并可选出图（jsdom 不做布局，测不出错位）
 └── host-patch/
     ├── README.md           输入框下方常驻 chip 的宿主补丁（需改 CloudCLI UI）
     ├── cost-command.md     内置 /cost 弹窗加缓存命中率与输出速率的宿主补丁
